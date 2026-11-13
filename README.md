@@ -185,3 +185,7 @@ ALTER TASK STUDENT.OPS.CLEAN_TASK SUSPEND;
 ```
 
 > **Note:** Tasks are planned as the next automation step. The README describes the target architecture; it does not mean `06_pipeline_tasks.sql` is already deployed or the procedures have already succeeded. Confirm the procedures and task privileges before enabling the schedule.
+
+
+Documentation
+https://medium.com/@susindaperera/exploring-snowflake-architecture-through-production-oriented-data-engineering-practices-cb4afa66b6cc
