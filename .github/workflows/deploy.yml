@@ -1,5 +1,5 @@
 
-name: Deploy Snowflake DEV
+name: Ingest Student CSV Data
 
 on:
   workflow_dispatch:
@@ -9,35 +9,44 @@ permissions:
   id-token: write
 
 jobs:
-  deploy:
-    name: Deploy Student Database
+  ingest:
     runs-on: ubuntu-latest
 
     env:
       SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
       SNOWFLAKE_USER: GITHUB_CICD_USER
       SNOWFLAKE_ROLE: STUDENT_DEPLOY_ROLE
+      SNOWFLAKE_WAREHOUSE: STUDENT_WH
 
     steps:
-      - name: Checkout repository
+      - name: Checkout GitHub repository
         uses: actions/checkout@v4
         with:
           persist-credentials: false
 
-      - name: Install Snowflake CLI and configure OIDC
+      - name: Set up Snowflake CLI
         uses: snowflakedb/snowflake-actions@v3
         with:
           use-oidc: true
 
-      - name: Test Snowflake connection
-        run: |
-          snow connection test -x
+      - name: Create Snowflake stage
+        run: snow sql -x -f sql/02_stage.sql
 
-      - name: Deploy student database
+      - name: Upload enrolments CSV from GitHub
         run: |
-          snow sql -x -f sql/01_setup.sql
+          snow stage copy \
+            data/enrolments.csv \
+            @STUDENT.RAW.CSV_STAGE/enrolments/ \
+            --no-auto-compress \
+            --overwrite
 
-      - name: Verify deployment
+      - name: Upload payments CSV from GitHub
         run: |
-          snow sql -x -q "SHOW TABLES IN SCHEMA STUDENT.RAW"
+          snow stage copy \
+            data/student_payments.csv \
+            @STUDENT.RAW.CSV_STAGE/payments/ \
+            --no-auto-compress \
+            --overwrite
 
+      - name: Load CSV data into Snowflake RAW tables
+        run: snow sql -x -f sql/03_load.sql
