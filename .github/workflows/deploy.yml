@@ -91,6 +91,7 @@ jobs:
 
       # 11. Verify final row counts
      
+      
       - name: Verify pipeline results
         run: |
           snow sql -x -q "
@@ -99,12 +100,23 @@ jobs:
 
             UNION ALL
 
+            SELECT 'RAW_PAYMENTS', COUNT(*)
+            FROM STUDENT.RAW.STUDENT_PAYMENTS
+
+            UNION ALL
+
             SELECT 'CLEAN_ENROLMENTS', COUNT(*)
             FROM STUDENT.CLEAN.ENROLMENTS
 
             UNION ALL
 
-            SELECT 'BIZ_SUMMARY', COUNT(*)
+            SELECT 'CLEAN_PAYMENTS', COUNT(*)
+            FROM STUDENT.CLEAN.STUDENT_PAYMENTS
+
+            UNION ALL
+
+            SELECT 'BIZ_TUITION_SUMMARY', COUNT(*)
             FROM STUDENT.BIZ.TUITION_SUMMARY
           "
+
 
