@@ -90,7 +90,10 @@ jobs:
       #       "CALL STUDENT.BIZ.REFRESH_BIZ()"
 
       # 11. Verify final row counts
-     
+
+      - name: Deploy Snowflake Task Graph
+        run: snow sql -x -f sql/06_pipeline_tasks.sql
+          
       
       - name: Verify pipeline results
         run: |
