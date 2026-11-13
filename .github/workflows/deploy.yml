@@ -1,5 +1,5 @@
 
-name: Ingest Student CSV Data
+name: Snowflake Student Data Pipeline
 
 on:
   workflow_dispatch:
@@ -9,7 +9,8 @@ permissions:
   id-token: write
 
 jobs:
-  ingest:
+  student-pipeline:
+    name: Deploy, Ingest and Transform
     runs-on: ubuntu-latest
 
     env:
@@ -19,20 +20,41 @@ jobs:
       SNOWFLAKE_WAREHOUSE: STUDENT_WH
 
     steps:
+
+      # 1. Download repository files
       - name: Checkout GitHub repository
         uses: actions/checkout@v4
         with:
           persist-credentials: false
 
+      # 2. Authenticate using GitHub OIDC
       - name: Set up Snowflake CLI
         uses: snowflakedb/snowflake-actions@v3
         with:
           use-oidc: true
+          cli-version: "3.16"
 
-      - name: Create Snowflake stage
+      - name: Verify Snowflake connection
+        run: snow connection test -x
+
+      # 3. Create warehouse, database, schemas and RAW tables
+      - name: Deploy Snowflake infrastructure
+        run: snow sql -x -f sql/01_setup.sql
+
+      # 4. Create CSV file format and internal stage
+      - name: Deploy internal file stage
         run: snow sql -x -f sql/02_stage.sql
 
-      - name: Upload enrolments CSV from GitHub
+      # 5. Create CLEAN tables, RAW streams and procedure
+      - name: Deploy CLEAN layer
+        run: snow sql -x -f sql/04_clean.sql
+
+      # 6. Create BIZ table and procedure
+      - name: Deploy BIZ layer
+        run: snow sql -x -f sql/05_biz.sql
+
+      # 7. Upload CSV source files to Snowflake stage
+      - name: Upload enrolments CSV
         run: |
           snow stage copy \
             data/enrolments.csv \
@@ -41,7 +63,7 @@ jobs:
             --overwrite \
             -x
 
-      - name: Upload payments CSV from GitHub
+      - name: Upload payments CSV
         run: |
           snow stage copy \
             data/student_payments.csv \
@@ -50,11 +72,33 @@ jobs:
             --overwrite \
             -x
 
-      - name: Load CSV data into Snowflake RAW tables
+      # 8. Load staged CSV records into RAW tables
+      - name: Load data into RAW layer
         run: snow sql -x -f sql/03_load.sql
-      
-      - name: Deploy CLEAN transformations
-        run: snow sql -x -f sql/04_clean.sql
 
-      - name: Deploy BIZ transformations
-        run: snow sql -x -f sql/05_biz.sql
+      #Below will bre run from snowflake pipelines
+      # 9. Process changes from RAW into CLEAN
+      # - name: Execute CLEAN transformation
+      #   run: |
+      #     snow sql -x -q \
+      #       "CALL STUDENT.CLEAN.REFRESH_CLEAN()"
+
+      # 10. Build business summary from CLEAN
+      # - name: Execute BIZ transformation
+      #   run: |
+      #     snow sql -x -q \
+      #       "CALL STUDENT.BIZ.REFRESH_BIZ()"
+
+      # 11. Verify final row counts
+      - name: Verify pipeline results
+        run: |
+          snow sql -x -q "
+            SELECT 'RAW_ENROLMENTS' AS LAYER, COUNT(*) AS ROWS
+            FROM STUDENT.RAW.ENROLMENTS
+            UNION ALL
+            SELECT 'CLEAN_ENROLMENTS', COUNT(*)
+            FROM STUDENT.CLEAN.ENROLMENTS
+            UNION ALL
+            SELECT 'BIZ_SUMMARY', COUNT(*)
+            FROM STUDENT.BIZ.TUITION_SUMMARY
+          "

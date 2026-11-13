@@ -1,6 +1,6 @@
 # Snowflake Student Data Pipeline
 
-A small university student-finance pipeline built in Snowflake using a **Bronze → Silver → Gold (Medallion) architecture**. GitHub stores version-controlled SQL and sample CSVs; GitHub Actions deploys objects and uploads source files; Snowflake executes transformations.
+A small university student-finance pipeline built in Snowflake using a **Bronze → Silver → Gold (Medallion) architecture**. GitHub stores version-controlled SQL and sample CSVs; **one GitHub Actions workflow** deploys objects and loads RAW data; **Snowflake Streams and Tasks** orchestrate transformations from RAW to CLEAN to BIZ.
 
 ## Repository structure
 
@@ -16,11 +16,10 @@ snoflake-pipelines/
 │   ├── 03_load.sql               # COPY INTO from staged CSV files to RAW tables
 │   ├── 04_clean.sql              # CLEAN tables, RAW streams and REFRESH_CLEAN procedure
 │   ├── 05_biz.sql                # BIZ summary table and REFRESH_BIZ procedure
-│   └── 06_pipeline_tasks.sql     # Scheduled task graph to invoke CLEAN then BIZ (when ready)
+│   └── 06_pipeline_tasks.sql     # Snowflake Task graph: CLEAN_TASK -> BIZ_TASK
 └── .github/
     └── workflows/
-        ├── deploy.yml           # Deploy Snowflake SQL objects through OIDC
-        └── ingest.yml           # Upload CSV files from data/ and execute COPY INTO
+        └── pipeline.yml         # ONE GitHub Actions workflow: deploy + stage/upload + RAW ingest + task setup
 ```
 
 > **Naming:** `snoflake-pipelines` is the current repository name. `STUDENT` is the Snowflake database; `RAW`, `CLEAN`, `BIZ`, and `OPS` are schemas. A Snowflake *virtual warehouse* (`STUDENT_WH`) provides compute; it does not contain the database or tables.
@@ -50,6 +49,8 @@ STUDENT.BIZ                    GOLD: reporting-ready tuition summary
 STUDENT.OPS                    Operational objects, including scheduled Tasks
 ```
 
+GitHub Actions handles deployment and ingestion, while **Snowflake Tasks—not GitHub Actions—execute recurring CLEAN and BIZ refreshes**.
+
 The internal **stage is a file-based landing zone**, not a fourth Medallion layer. The three Medallion layers are `RAW` (Bronze), `CLEAN` (Silver), and `BIZ` (Gold). The tables are queried with SQL and stored in Snowflake-managed storage.
 
 ## What each script does
@@ -59,12 +60,11 @@ The internal **stage is a file-based landing zone**, not a fourth Medallion laye
 | `0_serviceuser.sql` | Creates `STUDENT_DEPLOY_ROLE` and `GITHUB_CICD_USER`, configures trust for GitHub Actions OIDC, and grants required account-level creation privileges. | **Manually once** in Snowsight using an administrator role; **never** from GitHub Actions. |
 | `01_setup.sql` | Creates `STUDENT_WH`, the `STUDENT` database, `RAW`, `CLEAN`, `BIZ`, `OPS` schemas, and initial RAW tables. | GitHub Actions deployment. |
 | `02_stage.sql` | Defines CSV parsing rules (`CSV_FORMAT`) and Snowflake internal storage (`CSV_STAGE`). | GitHub Actions deployment or initial manual setup. |
-| `03_load.sql` | Reads staged files with `COPY INTO` and populates `STUDENT.RAW.ENROLMENTS` and `STUDENT.RAW.STUDENT_PAYMENTS`. | Ingestion workflow, after file upload. |
+| `03_load.sql` | Reads staged files with `COPY INTO` and populates `STUDENT.RAW.ENROLMENTS` and `STUDENT.RAW.STUDENT_PAYMENTS`. | One GitHub Actions workflow, after file upload. |
 | `04_clean.sql` | Creates SILVER tables, RAW Streams, and the `REFRESH_CLEAN()` stored procedure to clean/upsert rows. | GitHub Actions **deploys definitions**; the procedure must be called or triggered separately. |
 | `05_biz.sql` | Creates GOLD `TUITION_SUMMARY` and `REFRESH_BIZ()` to join enrolments with payments, calculate paid and outstanding balances, and derive reporting columns. | GitHub Actions **deploys definitions**; the procedure must be called or triggered separately. |
-| `06_pipeline_tasks.sql` | Defines Snowflake Tasks that call the CLEAN procedure on a schedule/stream condition and the BIZ procedure after CLEAN succeeds. | Deploy and activate **after manual transformation testing**; requires Snowflake task privileges. |
-| `deploy.yml` | Uses GitHub Actions and Snowflake CLI to deploy SQL objects. | Run manually (`workflow_dispatch`) or according to the workflow configuration. |
-| `ingest.yml` | Checks out `data/*.csv`, uploads files to `CSV_STAGE` with `snow stage copy`, and runs `03_load.sql`. | Run as an ingestion workflow; separate from deployment is preferred. |
+| `06_pipeline_tasks.sql` | Creates a Snowflake task graph: scheduled `CLEAN_TASK` checks RAW Streams and invokes `REFRESH_CLEAN()`; successful completion triggers `BIZ_TASK` to invoke `REFRESH_BIZ()`. | GitHub Actions **deploys** it after procedures exist; Snowflake **runs** it when activated. |
+| `pipeline.yml` | The **single GitHub Actions workflow**: authenticates with OIDC, sets up objects, uploads both CSVs, loads RAW data, and deploys the task graph. | Manual GitHub `workflow_dispatch` for deployment/ingestion, not the recurring CLEAN/BIZ scheduler. |
 
 ## One-time bootstrap: why `0_serviceuser.sql` must be run manually
 
@@ -80,45 +80,63 @@ Run `sql/0_serviceuser.sql` **once, manually in Snowsight with a sufficiently pr
 
 **Security note:** Keep the bootstrap script out of automatic deployment. Re-run or adjust it only when deliberately changing the service identity, GitHub trust configuration, or grants. Account-level `CREATE DATABASE` and `CREATE WAREHOUSE` are broad permissions: tighten the deployment permissions as the project matures. A personal Snowsight user and the CI service user are different principals and may have different role grants.
 
-## Deployment vs execution
+## One GitHub Actions workflow: deployment + RAW ingestion
 
-**Deploying SQL definitions is not the same as processing data.**
+We use **one** file: `.github/workflows/pipeline.yml`. The GitHub run sets up the Snowflake resources and ingests source files into the Bronze layer. It also **deploys** the CLEAN and BIZ procedures and Task graph; it does **not** call `REFRESH_CLEAN()` or `REFRESH_BIZ()` directly on each run.
 
 ```text
-01_setup.sql                 Create warehouse, database, schemas and RAW tables
-     |
-02_stage.sql                 Create the internal stage and CSV file format
-     |
-GitHub ingest.yml            Upload data/*.csv to the Snowflake stage
-     |
-03_load.sql                  COPY INTO -> RAW (Bronze) tables
-     |
-04_clean.sql                 CREATE CLEAN tables + RAW Streams + REFRESH_CLEAN()
-     |
-05_biz.sql                   CREATE BIZ table + REFRESH_BIZ()
-     |
-CALL REFRESH_CLEAN()          ACTUALLY transform RAW -> CLEAN
-     |
-CALL REFRESH_BIZ()            ACTUALLY transform CLEAN -> BIZ
-     |
-06_pipeline_tasks.sql        Later automate those procedure calls in Snowflake
+pipeline.yml (GitHub Actions, manual workflow_dispatch)
+    |
+    +-- 01_setup.sql          Create warehouse, database, schemas, RAW tables
+    +-- 02_stage.sql          Create CSV_FORMAT and CSV_STAGE
+    +-- 04_clean.sql          Create CLEAN tables, RAW Streams, CLEAN procedure
+    +-- 05_biz.sql            Create BIZ table, BIZ procedure
+    +-- Upload data/*.csv     snow stage copy -> CSV_STAGE
+    +-- 03_load.sql           COPY INTO -> RAW (Bronze) tables
+    +-- 06_pipeline_tasks.sql Create/resume Snowflake Task graph (when ready)
+                                  |
+                                  v
+                         Snowflake scheduler / Tasks
+                                  |
+                   CLEAN_TASK checks RAW Streams
+                                  |
+                       CALL REFRESH_CLEAN()
+                                  |
+                         CLEAN (Silver) tables
+                                  |
+                         BIZ_TASK (AFTER CLEAN_TASK)
+                                  |
+                        CALL REFRESH_BIZ()
+                                  |
+                          BIZ (Gold) table
 ```
 
-At present, `04_clean.sql` and `05_biz.sql` **define** the target objects and stored procedures. They do **not** automatically populate `CLEAN` or `BIZ`. For an initial manual test, execute:
+**Important distinction:** The `04_clean.sql` and `05_biz.sql` scripts **create definitions**, not a data refresh. After `06_pipeline_tasks.sql` has been deployed and the tasks are **resumed**, Snowflake schedules/executes the refresh calls internally. If the root task is scheduled every 15 minutes, there can be a delay after `COPY INTO` until the next check. A separate manual test can execute the procedures or root task before turning scheduling on.
 
-```sql
-USE ROLE STUDENT_DEPLOY_ROLE;
-USE WAREHOUSE STUDENT_WH;
+### Suggested workflow steps (inside the single file)
 
-CALL STUDENT.CLEAN.REFRESH_CLEAN();
-CALL STUDENT.BIZ.REFRESH_BIZ();
-
-SELECT COUNT(*) AS ENROLMENTS FROM STUDENT.CLEAN.ENROLMENTS;
-SELECT COUNT(*) AS PAYMENTS FROM STUDENT.CLEAN.STUDENT_PAYMENTS;
-SELECT * FROM STUDENT.BIZ.TUITION_SUMMARY LIMIT 20;
+```yaml
+# After checkout and Snowflake CLI OIDC setup:
+- name: Deploy infrastructure
+  run: snow sql -x -f sql/01_setup.sql
+- name: Deploy stage
+  run: snow sql -x -f sql/02_stage.sql
+- name: Deploy CLEAN definitions
+  run: snow sql -x -f sql/04_clean.sql
+- name: Deploy BIZ definitions
+  run: snow sql -x -f sql/05_biz.sql
+# Upload both CSVs from data/ using snow stage copy ... -x
+- name: Load RAW
+  run: snow sql -x -f sql/03_load.sql
+- name: Deploy Snowflake task graph
+  run: snow sql -x -f sql/06_pipeline_tasks.sql
 ```
 
-> If executing from your personal Snowsight account, the role must be assigned to that user. `GITHUB_CICD_USER` uses its own service role. Also, creating RAW Streams **after** initial data is loaded only includes historical rows if they are created with `SHOW_INITIAL_ROWS = TRUE`, as in the initial project script.
+Keep the existing CSV-upload steps in `pipeline.yml` between stage deployment and `03_load.sql`. Do **not** add direct `CALL STUDENT.CLEAN.REFRESH_CLEAN()` or `CALL STUDENT.BIZ.REFRESH_BIZ()` steps to GitHub Actions when using Task orchestration.
+
+**One-time manual setup:** `0_serviceuser.sql` remains outside the GitHub workflow. Use `ACCOUNTADMIN` to create the service principal and grant its role the required privileges. Snowflake task execution also requires `EXECUTE TASK` on the account for the task owner role, plus suitable warehouse and object privileges. Grant only what the deployment role needs.
+
+**Initial data already loaded:** If Streams were first created with `SHOW_INITIAL_ROWS = TRUE`, they can initially expose existing RAW records. Avoid dropping/replacing Streams on redeployment because that loses or resets their offsets. `CREATE ... IF NOT EXISTS` protects these particular Streams from being replaced. For production deployments, also plan safe updates to existing task definitions: `CREATE TASK IF NOT EXISTS` does not update a task whose definition has changed, and a task graph must be managed carefully when changing tasks while active.
 
 ## Future automation: Streams and Tasks
 
@@ -128,17 +146,42 @@ SELECT * FROM STUDENT.BIZ.TUITION_SUMMARY LIMIT 20;
 - GitHub Actions should **deploy** task definitions, not act as the long-term transformation scheduler.
 - Avoid recreating Streams on every deployment because their consumption positions matter. Test procedures manually before resuming tasks. Suspend scheduled tasks when not needed to control compute costs.
 
-## Current workflow responsibilities
+## Workflow responsibilities (single GitHub Actions file)
 
 | System | Responsibility |
 |---|---|
-| GitHub repository | Version-controlled SQL, sample CSVs, workflows |
-| GitHub Actions `deploy.yml` | Apply infrastructure and transformation definitions |
-| GitHub Actions `ingest.yml` | Upload files from `data/` and run `03_load.sql` |
-| Snowflake internal stage | Store CSVs awaiting ingestion |
-| Snowflake RAW tables | Preserve ingested records |
-| Snowflake CLEAN tables | Store validated and deduplicated records |
-| Snowflake BIZ table | Provide useful financial/reporting fields |
-| Snowflake Streams and Tasks | Detect changes and run in-platform transformations automatically |
+| GitHub repository | Version-controlled SQL, sample CSVs, and `pipeline.yml` |
+| GitHub Actions `pipeline.yml` | Deploy Snowflake definitions, upload `data/*.csv`, run `03_load.sql`, deploy Task definitions |
+| `0_serviceuser.sql` | **Manual one-time administrator bootstrap**, never called by GitHub Actions |
+| Snowflake internal `CSV_STAGE` | Store uploaded CSVs before RAW ingestion |
+| Snowflake RAW tables | Bronze, preserve ingested source records |
+| Snowflake RAW Streams | Track newly committed changes for downstream processing |
+| Snowflake `CLEAN_TASK` | On its schedule, check Streams and run `REFRESH_CLEAN()` |
+| Snowflake CLEAN tables | Silver, validated/deduplicated records |
+| Snowflake `BIZ_TASK` | Run `REFRESH_BIZ()` after `CLEAN_TASK` succeeds |
+| Snowflake BIZ table | Gold, reporting-ready tuition and payment metrics |
 
-**Current development note:** If `04_clean.sql` and `05_biz.sql` are appended to `ingest.yml`, the setup will work for initial deployment, but it mixes object deployment with ingestion. Once tested, move those steps to `deploy.yml` and leave `ingest.yml` to upload/load files.
+## Operational checks
+
+Preview results after the tasks have run:
+
+```sql
+SELECT COUNT(*) AS RAW_ENROLMENTS FROM STUDENT.RAW.ENROLMENTS;
+SELECT COUNT(*) AS CLEAN_ENROLMENTS FROM STUDENT.CLEAN.ENROLMENTS;
+SELECT COUNT(*) AS CLEAN_PAYMENTS FROM STUDENT.CLEAN.STUDENT_PAYMENTS;
+SELECT * FROM STUDENT.BIZ.TUITION_SUMMARY LIMIT 20;
+```
+
+See task states:
+
+```sql
+SHOW TASKS IN SCHEMA STUDENT.OPS;
+```
+
+To avoid ongoing scheduled compute charges in a learning account, suspend the root task when not testing:
+
+```sql
+ALTER TASK STUDENT.OPS.CLEAN_TASK SUSPEND;
+```
+
+> **Note:** Tasks are planned as the next automation step. The README describes the target architecture; it does not mean `06_pipeline_tasks.sql` is already deployed or the procedures have already succeeded. Confirm the procedures and task privileges before enabling the schedule.
