@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      SNOWFLAKE_ACCOUNT: LBJBYDK-RW74459
+      SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
       SNOWFLAKE_USER: GITHUB_CICD_USER
       SNOWFLAKE_ROLE: STUDENT_DEPLOY_ROLE
 
