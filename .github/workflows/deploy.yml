@@ -49,6 +49,12 @@ jobs:
             --no-auto-compress \
             --overwrite \
             -x
-            
+
       - name: Load CSV data into Snowflake RAW tables
         run: snow sql -x -f sql/03_load.sql
+      
+      - name: Deploy CLEAN transformations
+        run: snow sql -x -f sql/04_clean.sql
+
+      - name: Deploy BIZ transformations
+        run: snow sql -x -f sql/05_biz.sql
