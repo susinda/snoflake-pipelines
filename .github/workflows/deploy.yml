@@ -1,0 +1,43 @@
+
+name: Deploy Snowflake DEV
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    name: Deploy Student Database
+    runs-on: ubuntu-latest
+
+    env:
+      SNOWFLAKE_ACCOUNT: LBJBYDK-RW74459
+      SNOWFLAKE_USER: GITHUB_CICD_USER
+      SNOWFLAKE_ROLE: STUDENT_DEPLOY_ROLE
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Snowflake CLI and configure OIDC
+        uses: snowflakedb/snowflake-actions@v3
+        with:
+          use-oidc: true
+
+      - name: Test Snowflake connection
+        run: |
+          snow connection test -x
+
+      - name: Deploy student database
+        run: |
+          snow sql -x -f sql/01_setup.sql
+
+      - name: Verify deployment
+        run: |
+          snow sql -x -q "SHOW TABLES IN SCHEMA STUDENT.RAW"
+
