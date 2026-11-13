@@ -90,15 +90,21 @@ jobs:
       #       "CALL STUDENT.BIZ.REFRESH_BIZ()"
 
       # 11. Verify final row counts
+     
       - name: Verify pipeline results
         run: |
           snow sql -x -q "
-            SELECT 'RAW_ENROLMENTS' AS LAYER, COUNT(*) AS ROWS
+            SELECT 'RAW_ENROLMENTS' AS LAYER, COUNT(*) AS ROW_COUNT
             FROM STUDENT.RAW.ENROLMENTS
+
             UNION ALL
+
             SELECT 'CLEAN_ENROLMENTS', COUNT(*)
             FROM STUDENT.CLEAN.ENROLMENTS
+
             UNION ALL
+
             SELECT 'BIZ_SUMMARY', COUNT(*)
             FROM STUDENT.BIZ.TUITION_SUMMARY
           "
+
